@@ -2,23 +2,27 @@
 #define __STRUCTIO_H_
 
 template <typename T>
-inline void writeStruct(Stream &radio, const T *header)
+inline void writeStruct(Stream &stream, const T *header)
 {
-	writeStruct(radio, header, sizeof(T));
+	writeStruct(stream, header, sizeof(T));
 }
 
 template <typename T>
-inline void writeStruct(Stream &radio, const T *header, size_t length)
+inline void writeStruct(Stream &stream, const T *header, size_t length)
 {
-	radio.write((const char *)header, length);
+	stream.write((const uint8_t *)header, length);
 }
 
 template <typename T>
-inline bool readStruct(Stream &radio, T *header)
+inline bool readStruct(Stream &stream, T *header)
 {
-	while (radio.available() < sizeof(T))
-		;
-	return (radio.readBytes((char *)header, sizeof(T)) == sizeof(T));
+	return readStruct(stream, header, sizeof(T));
+}
+
+template <typename T>
+inline bool readStruct(Stream &stream, T *header, size_t length)
+{
+	return (stream.readBytes((uint8_t *)header, sizeof(T)) == sizeof(T));
 }
 
 #endif // __STRUCTIO_H_
