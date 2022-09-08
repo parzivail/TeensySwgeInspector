@@ -22,6 +22,13 @@ SdFile root;
 
 File dumpFile;
 
+uint64_t packetCount = 0;
+uint8_t packet_buffer[1024] = {0};
+uint64_t rollingPacketCount = 0;
+
+uint64_t fileSizeCounter = 0;
+uint64_t lastFileSizeCount = 0;
+
 void printVersion(HardwareSerial &radio)
 {
 	packet_header_t phCheckVersion;
@@ -171,7 +178,15 @@ void setup()
 		return;
 	}
 
-	dumpFile = SD.open("out.bin", FILE_WRITE_BEGIN);
+	char filename[9];
+	auto fileIdx = 0;
+	do
+	{
+		fileIdx++;
+		sprintf(filename, "%04d.bin", fileIdx);
+	} while (SD.exists(filename));
+
+	dumpFile = SD.open(filename, FILE_WRITE_BEGIN);
 
 	U_RADIO37.addMemoryForRead(&RADIO37_RX_BUFFER, SERIAL_BUFFER_SIZE);
 	U_RADIO37.setTimeout(0x7FFFFFFF);
@@ -183,20 +198,16 @@ void setup()
 	resetRadio(U_RADIO37);
 	delay(50);
 
-	startSniffer(U_RADIO37, 37);
+	U_HOST.print("Output file: ");
+	U_HOST.println(filename);
+	U_HOST.print("Radio version: ");
+	printVersion(U_RADIO37);
+	U_HOST.println();
 	delay(50);
 
-	// U_HOST.print("Radio version: ");
-	// printVersion(U_RADIO37);
-	// U_HOST.println();
+	startSniffer(U_RADIO37, 37);
+	delay(50);
 }
-
-uint64_t packetCount = 0;
-uint8_t packet_buffer[1024] = {0};
-uint64_t rollingPacketCount = 0;
-
-uint64_t fileSizeCounter = 0;
-uint64_t lastFileSizeCount = 0;
 
 void loop()
 {
@@ -234,6 +245,8 @@ void loop()
 
 	U_RADIO37.readBytes(packet_buffer, packetHeader.length);
 
+	uint32_t timestamp = millis();
+	dumpFile.write((uint8_t *)&timestamp, 4);
 	dumpFile.write((uint8_t *)&packetHeader, 3);
 	dumpFile.write(packet_buffer, packetHeader.length);
 
