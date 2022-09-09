@@ -18,6 +18,7 @@
 #define SERIAL_BUFFER_SIZE (16384)
 static uint8_t RADIO37_RX_BUFFER[SERIAL_BUFFER_SIZE] = {0};
 
+static uint8_t GPS_RX_BUFFER[SERIAL_BUFFER_SIZE] = {0};
 Adafruit_GPS GPS(&U_GPS);
 
 Sd2Card card;
@@ -111,8 +112,6 @@ void setup()
 	// Announce boot
 	pinMode(LED_BUILTIN, OUTPUT);
 	digitalWriteFast(LED_BUILTIN, HIGH);
-	delay(1000);
-	digitalWriteFast(LED_BUILTIN, LOW);
 
 	// Print crash report, if any
 	// if (CrashReport)
@@ -153,13 +152,10 @@ void setup()
 	U_RADIO37.attachRts(9);
 
 	// Initialize GPS UART
+	U_GPS.addMemoryForRead(&GPS_RX_BUFFER, SERIAL_BUFFER_SIZE);
 	GPS.begin(9600);
-	GPS.sendCommand(PMTK_SET_BAUD_115200);
-	delay(50);
-	GPS.begin(115200);
 	GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGAGSA); // RMC (recommended minimum data), GGA (fix data), and GSA (fix metadata) packets
 	GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
-	delay(50);
 
 	// Reset radios
 	resetRadio(U_RADIO37);
@@ -168,6 +164,8 @@ void setup()
 	// Start radios
 	startSniffer(U_RADIO37, 37);
 	delay(50);
+
+	digitalWriteFast(LED_BUILTIN, LOW);
 }
 
 /*
@@ -189,7 +187,7 @@ void loop()
 		U_HOST.print(" packets/s, ");
 		U_HOST.print(fileSizeCounter * 8 / 10);
 		U_HOST.println(" bps");
-		
+
 		U_HOST.flush();
 		dumpFile.flush();
 
@@ -215,8 +213,7 @@ void loop()
 
 	packetCount++;
 	rollingPacketCount++;
-	fileSizeCounter += 4;
-	fileSizeCounter += packetHeader.length;
+	fileSizeCounter += 4 + packetHeader.length;
 
 	// Keep statistucs about RX'd packets
 	if (packetHeader.tag == TAG_DATA)
@@ -235,22 +232,27 @@ void loop()
 	}
 
 	// Read one sentence from the GPS
-	GPS.read();
-	if (GPS.newNMEAreceived())
+	while (U_GPS.available())
 	{
-		auto sentence = GPS.lastNMEA();
-		auto sentenceLength = strlen(sentence);
-		if (sentenceLength <= 0xFF)
+		GPS.read();
+		if (GPS.newNMEAreceived())
 		{
-			sentenceLength &= 0xFF;
-
-			dumpFile.write(OUTPUT_TYPE_NMEA_SENTENCE);
-			dumpFile.write((uint8_t)sentenceLength);
-			dumpFile.write(sentence, sentenceLength);
-
-			if (GPS.parse(sentence))
+			auto sentence = GPS.lastNMEA();
+			auto sentenceLength = strlen(sentence);
+			if (sentenceLength <= 0xFF)
 			{
-				// TODO: do something with parsed GPS info?
+				sentenceLength &= 0xFF;
+
+				dumpFile.write(OUTPUT_TYPE_NMEA_SENTENCE);
+				dumpFile.write((uint8_t)sentenceLength);
+				dumpFile.write(sentence, sentenceLength);
+
+				fileSizeCounter += sentenceLength + 2;
+
+				if (GPS.parse(sentence))
+				{
+					// TODO: do something with parsed GPS info?
+				}
 			}
 		}
 	}
