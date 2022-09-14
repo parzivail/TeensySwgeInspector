@@ -4,21 +4,30 @@
 #include "packet.h"
 #include "structio.h"
 
+#define BYTE_START 0x7F
+#define BYTE_ESC 0x7E
+#define BYTE_END 0x7D
+#define BYTE_XOR 0x20
+#define BYTE_SEED 0xAA
+
 #define U_HOST (Serial)
 #define U_GPS (Serial1)
 #define U_RADIO37 (Serial2)
 #define U_RADIO38 (Serial3)
-#define U_RADIO39 (Serial4)
+#define U_RADIO39 (Serial5)
 
-#define RADIO_BAUD_RATE (1000000)
+#define RADIO_BAUD_RATE (115200)
 
 #define ADVERTISING_RADIO_ACCESS_ADDRESS (0x8E89BED6)
 #define ADVERTISING_CRC_INIT (0x555555)
 
-#define SERIAL_BUFFER_SIZE (16384)
-static uint8_t RADIO37_RX_BUFFER[SERIAL_BUFFER_SIZE] = {0};
+#define SERIAL_BUFFER_SIZE (65536)
+static DMAMEM uint8_t RADIO37_RX_BUFFER[SERIAL_BUFFER_SIZE] = {0};
+static DMAMEM uint8_t RADIO38_RX_BUFFER[SERIAL_BUFFER_SIZE] = {0};
+static DMAMEM uint8_t RADIO39_RX_BUFFER[SERIAL_BUFFER_SIZE] = {0};
 
-static uint8_t GPS_RX_BUFFER[SERIAL_BUFFER_SIZE] = {0};
+#define GPS_BUFFER_SIZE (16384)
+static DMAMEM uint8_t GPS_RX_BUFFER[GPS_BUFFER_SIZE] = {0};
 Adafruit_GPS GPS(&U_GPS);
 
 Sd2Card card;
@@ -28,11 +37,12 @@ SdFile root;
 File dumpFile;
 
 uint64_t packetCount = 0;
-uint8_t packet_buffer[1024] = {0};
+static DMAMEM uint8_t packet_buffer[65536] = {0};
 uint64_t rollingPacketCount = 0;
 
 uint64_t fileSizeCounter = 0;
 uint64_t lastFileSizeCount = 0;
+uint64_t lastMillisNoted = 0;
 
 enum
 {
@@ -42,6 +52,127 @@ enum
 	OUTPUT_TYPE_RADIO_PACKET_38 = 0x03,
 	OUTPUT_TYPE_RADIO_PACKET_39 = 0x04,
 };
+
+void printTagName(Stream &stream, int tag)
+{
+	if (tag == 0)
+	{
+		stream.print("TAG_DATA");
+		return;
+	}
+	if (tag == 0x40)
+	{
+		stream.print("TAG_MSG_RESET_COMPLETE");
+		return;
+	}
+	if (tag == 0x41)
+	{
+		stream.print("TAG_MSG_CONNECT_REQUEST");
+		return;
+	}
+	if (tag == 0x42)
+	{
+		stream.print("TAG_MSG_CONNECTION_EVENT");
+		return;
+	}
+	if (tag == 0x43)
+	{
+		stream.print("TAG_MSG_CONN_PARAM_UPDATE");
+		return;
+	}
+	if (tag == 0x44)
+	{
+		stream.print("TAG_MSG_CHAN_MAP_UPDATE");
+		return;
+	}
+	if (tag == 0x50)
+	{
+		stream.print("TAG_MSG_LOG");
+		return;
+	}
+	if (tag == 0x45)
+	{
+		stream.print("TAG_MSG_TERMINATE");
+		return;
+	}
+	if (tag == 0x80)
+	{
+		stream.print("TAG_CMD_RESET");
+		return;
+	}
+	if (tag == 0x81)
+	{
+		stream.print("TAG_CMD_GET_VERSION");
+		return;
+	}
+	if (tag == 0x82)
+	{
+		stream.print("TAG_CMD_SNIFF_CHANNEL");
+		return;
+	}
+
+	stream.print("<Unknown Tag 0x");
+	stream.print(tag, HEX);
+	stream.print(">");
+}
+
+int timedRead(Stream &stream, uint32_t timeout)
+{
+	int c;
+	unsigned long startMillis = millis();
+	do
+	{
+		c = stream.read();
+		if (c >= 0)
+			return c;
+		yield();
+	} while (millis() - startMillis < timeout);
+	return -1; // -1 indicates timeout
+}
+
+bool consumeFrameBegin(HardwareSerial &radio)
+{
+	return radio.read() == BYTE_START;
+}
+
+int32_t consumeFrame(HardwareSerial &radio)
+{
+	uint16_t length = 0;
+	uint8_t checksum = BYTE_SEED;
+
+	while (true)
+	{
+		int32_t data = timedRead(radio, 100);
+		if (data == -1)
+			return -1;
+
+		if (data == BYTE_ESC)
+		{
+			data = timedRead(radio, 100);
+			if (data == -1)
+				return -1;
+			data ^= BYTE_XOR;
+		}
+		else if (data == BYTE_END)
+			break;
+
+		packet_buffer[length] = data;
+		checksum ^= data;
+
+		length++;
+	}
+
+	// Pop the checksum byte off the top
+	length--;
+
+	// The checksum byte is at the end of the frame stream
+	// so if the checksum was computed from the preceding
+	// correctly, it will XOR with itself and become zero
+	if (checksum != 0)
+		return -1;
+
+	return length;
+}
 
 void printVersion(HardwareSerial &radio)
 {
@@ -107,6 +238,28 @@ void startSniffer(HardwareSerial &radio, uint8_t channel)
 	radio.clear();
 }
 
+void processPacket(int32_t frameLength)
+{
+	if (frameLength == -1)
+		return;
+
+	packet_t *packet = (packet_t *)packet_buffer;
+	if (packet->header.tag == TAG_DATA)
+	{
+		// TODO: do something with MAC addresses?
+
+		// auto packet = (radio_t *)packet_buffer;
+		// U_HOST.print(", time: ");
+		// U_HOST.print(packet->timestamp);
+		// U_HOST.print(", channel: ");
+		// U_HOST.print(packet->channel);
+		// U_HOST.print(", rssi: ");
+		// U_HOST.print(-packet->rssi_negative);
+
+		// U_HOST.println();
+	}
+}
+
 void setup()
 {
 	// Announce boot
@@ -114,25 +267,26 @@ void setup()
 	digitalWriteFast(LED_BUILTIN, HIGH);
 
 	// Print crash report, if any
-	// if (CrashReport)
-	// 	U_HOST.println(CrashReport);
-
-	// Initialize SD card
-	if (!card.init(SPI_FULL_SPEED, BUILTIN_SDCARD))
+	if (CrashReport)
 	{
-		U_HOST.println("card::init failed");
-		return;
+		for (uint8_t i = 0; i < 100; i++)
+		{
+			U_HOST.println("Waiting");
+			delay(50);
+		}
+		U_HOST.println(CrashReport);
 	}
 
-	if (!volume.init(card))
+	// Initialize SD card
+	if (!SD.begin(BUILTIN_SDCARD))
 	{
-		U_HOST.println("volume::init failed");
+		U_HOST.println("SD::begin failed");
 		return;
 	}
 
 	// Find next available filename
 	char filename[9];
-	auto fileIdx = 0;
+	uint16_t fileIdx = 0;
 	do
 	{
 		fileIdx++;
@@ -144,25 +298,59 @@ void setup()
 
 	dumpFile = SD.open(filename, FILE_WRITE_BEGIN);
 
+	/*
+		RADIO37
+			P11 -  6 (CTS)
+			P15 -  7 (RX2)
+			P16 -  8 (TX2)
+			P12 -  9 (RTS)
+		RADIO38
+			P11 - 19 (CTS)
+			P15 - 15 (RX3)
+			P16 - 14 (TX3)
+			P12 - 40 (RTS)
+		RADIO39
+			P11 - 23 (CTS)
+			P15 - 21 (RX5)
+			P16 - 20 (TX5)
+			P12 - 22 (RTS)
+	*/
+
 	// Initialize radio UART
 	U_RADIO37.addMemoryForRead(&RADIO37_RX_BUFFER, SERIAL_BUFFER_SIZE);
 	U_RADIO37.setTimeout(0x7FFFFFFF);
 	U_RADIO37.begin(RADIO_BAUD_RATE);
-	U_RADIO37.attachCts(6);
-	U_RADIO37.attachRts(9);
+	// U_RADIO37.attachCts(6);
+	// U_RADIO37.attachRts(9);
+
+	U_RADIO38.addMemoryForRead(&RADIO38_RX_BUFFER, SERIAL_BUFFER_SIZE);
+	U_RADIO38.setTimeout(0x7FFFFFFF);
+	U_RADIO38.begin(RADIO_BAUD_RATE);
+	// U_RADIO38.attachCts(19);
+	// U_RADIO38.attachRts(40);
+
+	U_RADIO39.addMemoryForRead(&RADIO39_RX_BUFFER, SERIAL_BUFFER_SIZE);
+	U_RADIO39.setTimeout(0x7FFFFFFF);
+	U_RADIO39.begin(RADIO_BAUD_RATE);
+	// U_RADIO39.attachCts(22);
+	// U_RADIO39.attachRts(23);
 
 	// Initialize GPS UART
-	U_GPS.addMemoryForRead(&GPS_RX_BUFFER, SERIAL_BUFFER_SIZE);
+	U_GPS.addMemoryForRead(&GPS_RX_BUFFER, GPS_BUFFER_SIZE);
 	GPS.begin(9600);
 	GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGAGSA); // RMC (recommended minimum data), GGA (fix data), and GSA (fix metadata) packets
 	GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
 
 	// Reset radios
 	resetRadio(U_RADIO37);
+	resetRadio(U_RADIO38);
+	resetRadio(U_RADIO39);
 	delay(50);
 
 	// Start radios
 	startSniffer(U_RADIO37, 37);
+	startSniffer(U_RADIO38, 38);
+	startSniffer(U_RADIO39, 39);
 	delay(50);
 
 	digitalWriteFast(LED_BUILTIN, LOW);
@@ -197,42 +385,67 @@ void loop()
 	}
 
 	// Write system timestamp
-	uint32_t timestamp = millis();
-	dumpFile.write(OUTPUT_TYPE_SYSTEM_TIMESTAMP);
-	dumpFile.write((uint8_t *)&timestamp, 4);
-	fileSizeCounter += 5;
-
-	// Read one packet from Radio37
-	packet_header_t packetHeader = {0};
-	readStruct(U_RADIO37, &packetHeader);
-	U_RADIO37.readBytes(packet_buffer, packetHeader.length);
-
-	dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_37);
-	dumpFile.write((uint8_t *)&packetHeader, 3);
-	dumpFile.write(packet_buffer, packetHeader.length);
-
-	packetCount++;
-	rollingPacketCount++;
-	fileSizeCounter += 4 + packetHeader.length;
-
-	// Keep statistucs about RX'd packets
-	if (packetHeader.tag == TAG_DATA)
+	if (now - lastMillisNoted > 250)
 	{
-		// TODO: do something with MAC addresses?
+		dumpFile.write(OUTPUT_TYPE_SYSTEM_TIMESTAMP);
+		dumpFile.write((uint8_t *)&now, 4);
+		fileSizeCounter += 5;
+		lastMillisNoted = now;
+	}
 
-		// auto packet = (radio_t *)packet_buffer;
-		// U_HOST.print(", time: ");
-		// U_HOST.print(packet->timestamp);
-		// U_HOST.print(", channel: ");
-		// U_HOST.print(packet->channel);
-		// U_HOST.print(", rssi: ");
-		// U_HOST.print(-packet->rssi_negative);
+	// Read one packet from RADIO37
+	if (consumeFrameBegin(U_RADIO37))
+	{
+		int32_t frameLength = consumeFrame(U_RADIO37);
+		if (frameLength != -1)
+		{
+			processPacket(frameLength);
 
-		// U_HOST.println();
+			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_37);
+			dumpFile.write(packet_buffer, frameLength);
+
+			packetCount++;
+			rollingPacketCount++;
+			fileSizeCounter += frameLength;
+		}
+	}
+
+	// Read one packet from RADIO38
+	if (consumeFrameBegin(U_RADIO38))
+	{
+		int32_t frameLength = consumeFrame(U_RADIO38);
+		if (frameLength != -1)
+		{
+			processPacket(frameLength);
+
+			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_38);
+			dumpFile.write(packet_buffer, frameLength);
+
+			packetCount++;
+			rollingPacketCount++;
+			fileSizeCounter += frameLength;
+		}
+	}
+
+	// Read one packet from RADIO39
+	if (consumeFrameBegin(U_RADIO39))
+	{
+		int32_t frameLength = consumeFrame(U_RADIO39);
+		if (frameLength != -1)
+		{
+			processPacket(frameLength);
+
+			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_39);
+			dumpFile.write(packet_buffer, frameLength);
+
+			packetCount++;
+			rollingPacketCount++;
+			fileSizeCounter += frameLength;
+		}
 	}
 
 	// Read one sentence from the GPS
-	while (U_GPS.available())
+	if (U_GPS.available())
 	{
 		GPS.read();
 		if (GPS.newNMEAreceived())
