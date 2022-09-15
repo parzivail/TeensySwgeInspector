@@ -280,6 +280,7 @@ void setup()
 	// Print crash report, if any
 	if (CrashReport)
 	{
+		display.setStatus("Found crash");
 		for (uint8_t i = 0; i < 100; i++)
 		{
 			U_HOST.println("Waiting");
@@ -293,6 +294,7 @@ void setup()
 	// Initialize SD card
 	if (!SD.begin(BUILTIN_SDCARD))
 	{
+		display.setStatus("No SD card");
 		U_HOST.println("SD::begin failed");
 		return;
 	}
@@ -313,20 +315,14 @@ void setup()
 
 	/*
 		RADIO37
-			P11 -  6 (CTS)
 			P15 -  7 (RX2)
 			P16 -  8 (TX2)
-			P12 -  9 (RTS)
 		RADIO38
-			P11 - 19 (CTS)
 			P15 - 15 (RX3)
 			P16 - 14 (TX3)
-			P12 - 40 (RTS)
 		RADIO39
-			P11 - 23 (CTS)
 			P15 - 21 (RX5)
 			P16 - 20 (TX5)
-			P12 - 22 (RTS)
 	*/
 
 	display.setStatus("Init radios");
@@ -335,20 +331,14 @@ void setup()
 	U_RADIO37.addMemoryForRead(&RADIO37_RX_BUFFER, SERIAL_BUFFER_SIZE);
 	U_RADIO37.setTimeout(0x7FFFFFFF);
 	U_RADIO37.begin(RADIO_BAUD_RATE);
-	// U_RADIO37.attachCts(6);
-	// U_RADIO37.attachRts(9);
 
 	U_RADIO38.addMemoryForRead(&RADIO38_RX_BUFFER, SERIAL_BUFFER_SIZE);
 	U_RADIO38.setTimeout(0x7FFFFFFF);
 	U_RADIO38.begin(RADIO_BAUD_RATE);
-	// U_RADIO38.attachCts(19);
-	// U_RADIO38.attachRts(40);
 
 	U_RADIO39.addMemoryForRead(&RADIO39_RX_BUFFER, SERIAL_BUFFER_SIZE);
 	U_RADIO39.setTimeout(0x7FFFFFFF);
 	U_RADIO39.begin(RADIO_BAUD_RATE);
-	// U_RADIO39.attachCts(22);
-	// U_RADIO39.attachRts(23);
 
 	display.setStatus("Init GPS");
 
@@ -386,8 +376,20 @@ void setup()
 */
 void loop()
 {
+	uint32_t now = millis();
+	uint16_t nowMicrosFraction = micros() % 1000;
+
+	// Write system timestamp
+	if (now - lastMillisNoted > 250)
+	{
+		dumpFile.write(OUTPUT_TYPE_SYSTEM_TIMESTAMP);
+		dumpFile.write((uint8_t *)&now, 4);
+		dumpFile.write((uint8_t *)&nowMicrosFraction, 2);
+		fileSizeCounter += 7;
+		lastMillisNoted = now;
+	}
+
 	// Display statistics
-	auto now = millis();
 	if (now - lastFlush > 10000)
 	{
 		U_HOST.print(packetCount);
@@ -410,63 +412,69 @@ void loop()
 		lastDisplayUpdate = now;
 	}
 
-	// Write system timestamp
-	if (now - lastMillisNoted > 250)
-	{
-		dumpFile.write(OUTPUT_TYPE_SYSTEM_TIMESTAMP);
-		dumpFile.write((uint8_t *)&now, 4);
-		fileSizeCounter += 5;
-		lastMillisNoted = now;
-	}
-
 	if (consumeFrameBegin(U_RADIO37))
 	{
+		now = millis();
+		nowMicrosFraction = micros() % 1000;
+		
 		int32_t frameLength = consumeFrame(U_RADIO37);
 		if (frameLength != -1)
 		{
 			processPacket(frameLength);
 
 			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_37);
+			dumpFile.write((uint8_t *)&now, 4);
+			dumpFile.write((uint8_t *)&nowMicrosFraction, 2);
 			dumpFile.write((uint8_t *)&frameLength, 4);
 			dumpFile.write(packet_buffer, frameLength);
 
 			packetCount++;
 			rollingPacketCount++;
-			fileSizeCounter += frameLength + 5;
+			fileSizeCounter += frameLength + 11;
 		}
 	}
 
 	if (consumeFrameBegin(U_RADIO38))
 	{
+		now = millis();
+		nowMicrosFraction = micros() % 1000;
+
 		int32_t frameLength = consumeFrame(U_RADIO38);
 		if (frameLength != -1)
 		{
 			processPacket(frameLength);
 
 			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_38);
+			dumpFile.write((uint8_t *)&now, 4);
+			dumpFile.write((uint8_t *)&nowMicrosFraction, 2);
 			dumpFile.write((uint8_t *)&frameLength, 4);
 			dumpFile.write(packet_buffer, frameLength);
 
 			packetCount++;
 			rollingPacketCount++;
-			fileSizeCounter += frameLength + 5;
+			fileSizeCounter += frameLength + 11;
 		}
 	}
 
 	if (consumeFrameBegin(U_RADIO39))
 	{
+		now = millis();
+		nowMicrosFraction = micros() % 1000;
+		
 		int32_t frameLength = consumeFrame(U_RADIO39);
 		if (frameLength != -1)
 		{
 			processPacket(frameLength);
 
 			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_39);
+			dumpFile.write((uint8_t *)&now, 4);
+			dumpFile.write((uint8_t *)&nowMicrosFraction, 2);
 			dumpFile.write((uint8_t *)&frameLength, 4);
 			dumpFile.write(packet_buffer, frameLength);
 
 			packetCount++;
 			rollingPacketCount++;
-			fileSizeCounter += frameLength + 5;
+			fileSizeCounter += frameLength + 11;
 		}
 	}
 
@@ -480,13 +488,18 @@ void loop()
 			auto sentenceLength = strlen(sentence);
 			if (sentenceLength <= 0xFF)
 			{
+				now = millis();
+				nowMicrosFraction = micros() % 1000;
+
 				sentenceLength &= 0xFF;
 
 				dumpFile.write(OUTPUT_TYPE_NMEA_SENTENCE);
+				dumpFile.write((uint8_t *)&now, 4);
+				dumpFile.write((uint8_t *)&nowMicrosFraction, 2);
 				dumpFile.write((uint8_t)sentenceLength);
 				dumpFile.write(sentence, sentenceLength);
 
-				fileSizeCounter += sentenceLength + 2;
+				fileSizeCounter += sentenceLength + 8;
 
 				if (GPS.parse(sentence))
 				{
