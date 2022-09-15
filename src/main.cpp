@@ -1,14 +1,19 @@
 #include <Adafruit_GPS.h>
 #include <SD.h>
 #include <SPI.h>
+#include "display.h"
 #include "packet.h"
 #include "structio.h"
 
-#define BYTE_START 0x7F
-#define BYTE_ESC 0x7E
-#define BYTE_END 0x7D
-#define BYTE_XOR 0x20
-#define BYTE_SEED 0xAA
+#define BYTE_START (0x7F)
+#define BYTE_ESC (0x7E)
+#define BYTE_END (0x7D)
+#define BYTE_XOR (0x20)
+#define BYTE_SEED (0xAA)
+
+#define LCD_CK (3)
+#define LCD_DI (4)
+#define LCD_CS (5)
 
 #define U_HOST (Serial)
 #define U_GPS (Serial1)
@@ -30,6 +35,8 @@ static DMAMEM uint8_t RADIO39_RX_BUFFER[SERIAL_BUFFER_SIZE] = {0};
 static DMAMEM uint8_t GPS_RX_BUFFER[GPS_BUFFER_SIZE] = {0};
 Adafruit_GPS GPS(&U_GPS);
 
+Display display(LCD_CK, LCD_DI, LCD_CS);
+
 Sd2Card card;
 SdVolume volume;
 SdFile root;
@@ -41,8 +48,9 @@ static DMAMEM uint8_t packet_buffer[65536] = {0};
 uint64_t rollingPacketCount = 0;
 
 uint64_t fileSizeCounter = 0;
-uint64_t lastFileSizeCount = 0;
+uint64_t lastFlush = 0;
 uint64_t lastMillisNoted = 0;
+uint64_t lastDisplayUpdate = 0;
 
 enum
 {
@@ -266,6 +274,9 @@ void setup()
 	pinMode(LED_BUILTIN, OUTPUT);
 	digitalWriteFast(LED_BUILTIN, HIGH);
 
+	display.init();
+	display.setStatus("Checking logs");
+
 	// Print crash report, if any
 	if (CrashReport)
 	{
@@ -276,6 +287,8 @@ void setup()
 		}
 		U_HOST.println(CrashReport);
 	}
+
+	display.setStatus("Init SD card");
 
 	// Initialize SD card
 	if (!SD.begin(BUILTIN_SDCARD))
@@ -316,6 +329,8 @@ void setup()
 			P12 - 22 (RTS)
 	*/
 
+	display.setStatus("Init radios");
+
 	// Initialize radio UART
 	U_RADIO37.addMemoryForRead(&RADIO37_RX_BUFFER, SERIAL_BUFFER_SIZE);
 	U_RADIO37.setTimeout(0x7FFFFFFF);
@@ -335,11 +350,15 @@ void setup()
 	// U_RADIO39.attachCts(22);
 	// U_RADIO39.attachRts(23);
 
+	display.setStatus("Init GPS");
+
 	// Initialize GPS UART
 	U_GPS.addMemoryForRead(&GPS_RX_BUFFER, GPS_BUFFER_SIZE);
 	GPS.begin(9600);
 	GPS.sendCommand(PMTK_SET_NMEA_OUTPUT_RMCGGAGSA); // RMC (recommended minimum data), GGA (fix data), and GSA (fix metadata) packets
 	GPS.sendCommand(PMTK_SET_NMEA_UPDATE_1HZ);
+
+	display.setStatus("Start radios");
 
 	// Reset radios
 	resetRadio(U_RADIO37);
@@ -352,6 +371,8 @@ void setup()
 	startSniffer(U_RADIO38, 38);
 	startSniffer(U_RADIO39, 39);
 	delay(50);
+
+	display.setStatus(filename);
 
 	digitalWriteFast(LED_BUILTIN, LOW);
 }
@@ -367,21 +388,26 @@ void loop()
 {
 	// Display statistics
 	auto now = millis();
-	if (now - lastFileSizeCount > 10000)
+	if (now - lastFlush > 10000)
 	{
 		U_HOST.print(packetCount);
-		U_HOST.print(" packets, ");
-		U_HOST.print(rollingPacketCount / 10);
-		U_HOST.print(" packets/s, ");
-		U_HOST.print(fileSizeCounter * 8 / 10);
-		U_HOST.println(" bps");
+		U_HOST.println(" packets");
 
 		U_HOST.flush();
 		dumpFile.flush();
 
-		lastFileSizeCount = now;
+		lastFlush = now;
+	}
+
+	// Update LCD
+	if (now - lastDisplayUpdate > 1000)
+	{
+		display.setDetailsCount(packetCount, rollingPacketCount, fileSizeCounter * 8);
+
 		fileSizeCounter = 0;
 		rollingPacketCount = 0;
+
+		lastDisplayUpdate = now;
 	}
 
 	// Write system timestamp
@@ -393,7 +419,6 @@ void loop()
 		lastMillisNoted = now;
 	}
 
-	// Read one packet from RADIO37
 	if (consumeFrameBegin(U_RADIO37))
 	{
 		int32_t frameLength = consumeFrame(U_RADIO37);
@@ -402,15 +427,15 @@ void loop()
 			processPacket(frameLength);
 
 			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_37);
+			dumpFile.write((uint8_t *)&frameLength, 4);
 			dumpFile.write(packet_buffer, frameLength);
 
 			packetCount++;
 			rollingPacketCount++;
-			fileSizeCounter += frameLength;
+			fileSizeCounter += frameLength + 5;
 		}
 	}
 
-	// Read one packet from RADIO38
 	if (consumeFrameBegin(U_RADIO38))
 	{
 		int32_t frameLength = consumeFrame(U_RADIO38);
@@ -419,15 +444,15 @@ void loop()
 			processPacket(frameLength);
 
 			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_38);
+			dumpFile.write((uint8_t *)&frameLength, 4);
 			dumpFile.write(packet_buffer, frameLength);
 
 			packetCount++;
 			rollingPacketCount++;
-			fileSizeCounter += frameLength;
+			fileSizeCounter += frameLength + 5;
 		}
 	}
 
-	// Read one packet from RADIO39
 	if (consumeFrameBegin(U_RADIO39))
 	{
 		int32_t frameLength = consumeFrame(U_RADIO39);
@@ -436,11 +461,12 @@ void loop()
 			processPacket(frameLength);
 
 			dumpFile.write(OUTPUT_TYPE_RADIO_PACKET_39);
+			dumpFile.write((uint8_t *)&frameLength, 4);
 			dumpFile.write(packet_buffer, frameLength);
 
 			packetCount++;
 			rollingPacketCount++;
-			fileSizeCounter += frameLength;
+			fileSizeCounter += frameLength + 5;
 		}
 	}
 
